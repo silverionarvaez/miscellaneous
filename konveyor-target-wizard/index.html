@@ -179,6 +179,85 @@
     .repo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.25rem; }
     .repo-grid .span-2 { grid-column: span 2; }
 
+    /* ---------- Editor interactivo de reglas ---------- */
+    .builder-toolbar {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.9rem; font-size: 0.9rem;
+    }
+    .rule-list { list-style: none; display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1rem; }
+    .rule-card {
+      display: flex; justify-content: space-between; gap: 0.75rem;
+      border: 1px solid var(--kv-border); border-left: 3px solid var(--kv-blue);
+      border-radius: 6px; padding: 0.7rem 0.9rem; background: #fff;
+    }
+    .rule-card-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .rule-card-title code { font-weight: 700; font-size: 0.88rem; }
+    .rule-desc { font-size: 0.85rem; margin-top: 0.25rem; }
+    .rule-when { font-size: 0.78rem; color: var(--kv-muted); margin-top: 0.35rem; }
+    .rule-when code { background: #f5f5f5; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .rule-when em { font-weight: 700; font-style: normal; color: var(--kv-blue-dark); }
+    .rule-card-actions { display: flex; flex-direction: column; gap: 0.3rem; flex: none; }
+    .btn-mini {
+      font: inherit; font-size: 0.78rem;
+      background: none; border: 1px solid var(--kv-border); border-radius: 4px;
+      padding: 0.2rem 0.55rem; cursor: pointer; white-space: nowrap;
+    }
+    .btn-mini:hover { border-color: var(--kv-blue); color: var(--kv-blue); }
+    .badge {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      padding: 0.15rem 0.5rem; border-radius: 999px;
+    }
+    .badge-mandatory { background: #faeae8; color: var(--kv-red); }
+    .badge-optional  { background: #eef4fb; color: var(--kv-blue-dark); }
+    .badge-potential { background: var(--kv-yellow-bg); color: #795600; }
+    .badge-effort    { background: #f5f5f5; color: var(--kv-muted); text-transform: none; }
+
+    .empty-state {
+      text-align: center; padding: 2rem 1rem;
+      border: 2px dashed var(--kv-border); border-radius: 8px;
+    }
+    .empty-state p:first-child { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.4rem; }
+    .empty-state .hint { max-width: 420px; margin: 0 auto 1rem; }
+
+    .builder-form {
+      border: 1px solid var(--kv-blue); border-radius: 8px;
+      padding: 1.1rem 1.25rem; margin-bottom: 1rem;
+      background: #fbfdff;
+    }
+    .builder-form h3 { font-size: 1.05rem; margin-bottom: 0.9rem; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.25rem; }
+    .form-grid .span-2 { grid-column: span 2; }
+
+    .logic-row {
+      display: flex; align-items: center; gap: 0.6rem;
+      font-size: 0.85rem; margin-bottom: 0.6rem;
+    }
+    .logic-row select { width: auto; padding: 0.3rem 0.5rem; }
+    .cond-row {
+      border: 1px solid var(--kv-border); border-radius: 6px;
+      padding: 0.7rem 0.85rem; margin-bottom: 0.6rem; background: #fff;
+    }
+    .cond-head { display: flex; gap: 0.5rem; align-items: center; }
+    .cond-head select { flex: 1; }
+    .cond-help { font-size: 0.75rem; color: var(--kv-muted); margin: 0.35rem 0 0.5rem; }
+    .cond-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    .cond-fields .cf { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; }
+    .cond-fields .cf span { font-weight: 600; }
+    .cond-fields .cf-wide { grid-column: span 2; }
+    .btn-link {
+      background: none; border: none; color: var(--kv-blue);
+      font: inherit; font-size: 0.85rem; font-weight: 600;
+      cursor: pointer; padding: 0.2rem 0;
+    }
+    .btn-link:hover { text-decoration: underline; }
+
+    .yaml-details { margin-top: 1rem; }
+    .yaml-details summary {
+      cursor: pointer; font-size: 0.88rem; font-weight: 600;
+      padding: 0.4rem 0; color: var(--kv-blue-dark);
+    }
+    .yaml-details .code { margin-top: 0.5rem; }
+
     /* ---------- Labels y sources ---------- */
     .inline-add { display: flex; gap: 0.5rem; margin-bottom: 0.6rem; }
     .inline-add input { flex: 1; }

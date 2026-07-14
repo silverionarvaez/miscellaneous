@@ -5,16 +5,20 @@
  * replicando el flujo de tackle2-ui (Administration > Custom migration targets):
  *
  *   1. Datos generales  : nombre, descripción, proveedor de lenguaje, icono
- *   2. Reglas           : subida manual de ficheros YAML de reglas, o repositorio (git/svn)
+ *   2. Reglas           : editor interactivo de reglas (por defecto), subida
+ *                         manual de ficheros YAML, o repositorio (git/svn)
  *   3. Labels y sources : label automático konveyor.io/target=<slug>, labels custom y sources
  *   4. Revisión         : resumen + payload JSON listo para POST /hub/targets
+ *
+ * El editor interactivo genera reglas YAML del analyzer-lsp
+ * (https://github.com/konveyor/analyzer-lsp) sin escribir YAML a mano.
  *
  * Sin dependencias externas: TypeScript estricto compilado a un único wizard.js.
  */
 
 /* ============================== Modelo ============================== */
 
-type RulesMode = "upload" | "repository";
+type RulesMode = "create" | "upload" | "repository";
 
 interface RuleFile {
   name: string;
@@ -32,6 +36,33 @@ interface RepoConfig {
   credentials: string;
 }
 
+type CondProvider = "java.referenced" | "builtin.filecontent" | "builtin.file" | "builtin.xml";
+
+interface SimpleCond {
+  provider: CondProvider;
+  pattern: string;
+  location: string;    // java.referenced
+  filePattern: string; // builtin.filecontent
+  xpath: string;       // builtin.xml
+  filepaths: string;   // builtin.xml (separados por comas)
+}
+
+type RuleCategory = "mandatory" | "optional" | "potential";
+type CondLogic = "single" | "and" | "or";
+
+interface BuiltRule {
+  ruleID: string;
+  description: string;
+  category: RuleCategory;
+  effort: number;
+  message: string;
+  labels: string; // labels adicionales, separados por comas
+  logic: CondLogic;
+  conditions: SimpleCond[];
+  linkTitle: string;
+  linkUrl: string;
+}
+
 interface WizardState {
   step: number;
   maxVisited: number;
@@ -42,6 +73,9 @@ interface WizardState {
   icon: string;
   // Paso 2
   mode: RulesMode;
+  rules: BuiltRule[];
+  draft: BuiltRule | null;
+  draftIndex: number; // -1 = regla nueva
   files: RuleFile[];
   repo: RepoConfig;
   // Paso 3
@@ -63,6 +97,36 @@ const KNOWN_SOURCES = [
   "camel", "camel2", "camel3", "thorntail", "drools", "jbpm",
 ];
 
+const JAVA_LOCATIONS = [
+  "", "IMPORT", "PACKAGE", "TYPE", "INHERITANCE", "IMPLEMENTS_TYPE",
+  "ANNOTATION", "METHOD_CALL", "CONSTRUCTOR_CALL", "RETURN_TYPE", "FIELD", "ENUM",
+];
+
+const EFFORT_LEVELS = [0, 1, 3, 5, 7, 13];
+
+const COND_PROVIDERS: { value: CondProvider; label: string; help: string }[] = [
+  {
+    value: "java.referenced",
+    label: "java.referenced — referencia Java",
+    help: "Detecta usos de una clase/paquete Java (imports, anotaciones, llamadas...)",
+  },
+  {
+    value: "builtin.filecontent",
+    label: "builtin.filecontent — contenido de fichero",
+    help: "Busca un patrón (regex) dentro del contenido de los ficheros",
+  },
+  {
+    value: "builtin.file",
+    label: "builtin.file — existencia de fichero",
+    help: "Detecta ficheros cuyo nombre coincide con un patrón",
+  },
+  {
+    value: "builtin.xml",
+    label: "builtin.xml — XPath en XML",
+    help: "Evalúa una expresión XPath sobre ficheros XML",
+  },
+];
+
 const state: WizardState = {
   step: 0,
   maxVisited: 0,
@@ -70,7 +134,10 @@ const state: WizardState = {
   description: "",
   provider: "Java",
   icon: ICONS[0],
-  mode: "upload",
+  mode: "create",
+  rules: [],
+  draft: null,
+  draftIndex: -1,
   files: [],
   repo: { kind: "git", url: "", branch: "", path: "", credentials: "" },
   customLabels: [],
@@ -80,7 +147,7 @@ const state: WizardState = {
 
 const STEPS = [
   { title: "Datos generales", subtitle: "Nombre, descripción e icono" },
-  { title: "Reglas personalizadas", subtitle: "Ficheros YAML o repositorio" },
+  { title: "Reglas personalizadas", subtitle: "Editor, ficheros o repositorio" },
   { title: "Labels y sources", subtitle: "Etiquetado del target" },
   { title: "Revisión y creación", subtitle: "Payload para el Hub" },
 ] as const;
@@ -115,6 +182,166 @@ function $(sel: string): HTMLElement {
   const node = document.querySelector<HTMLElement>(sel);
   if (!node) throw new Error(`Elemento no encontrado: ${sel}`);
   return node;
+}
+
+/* ============================== Editor de reglas ============================== */
+
+function newCondition(): SimpleCond {
+  return { provider: "java.referenced", pattern: "", location: "", filePattern: "", xpath: "", filepaths: "" };
+}
+
+function nextRuleId(): string {
+  const prefix = slugify(state.name) || "regla";
+  const used = new Set(state.rules.map((r) => r.ruleID));
+  let n = state.rules.length + 1;
+  let id = "";
+  do {
+    id = `${prefix}-${String(n).padStart(5, "0")}`;
+    n += 1;
+  } while (used.has(id));
+  return id;
+}
+
+function newRule(): BuiltRule {
+  return {
+    ruleID: nextRuleId(),
+    description: "",
+    category: "mandatory",
+    effort: 1,
+    message: "",
+    labels: "",
+    logic: "single",
+    conditions: [newCondition()],
+    linkTitle: "",
+    linkUrl: "",
+  };
+}
+
+function condSummary(c: SimpleCond): string {
+  switch (c.provider) {
+    case "java.referenced":
+      return `java.referenced: ${c.pattern}${c.location ? ` (${c.location})` : ""}`;
+    case "builtin.filecontent":
+      return `filecontent: /${c.pattern}/${c.filePattern ? ` en ${c.filePattern}` : ""}`;
+    case "builtin.file":
+      return `file: ${c.pattern}`;
+    case "builtin.xml":
+      return `xml: ${c.xpath}`;
+  }
+}
+
+function validateDraft(rule: BuiltRule): string[] {
+  const errors: string[] = [];
+  if (!rule.ruleID.trim()) {
+    errors.push("El ruleID es obligatorio.");
+  } else if (!/^[a-zA-Z0-9._-]+$/.test(rule.ruleID.trim())) {
+    errors.push("El ruleID solo puede contener letras, números, puntos, guiones y guiones bajos.");
+  } else if (
+    state.rules.some((r, i) => i !== state.draftIndex && r.ruleID === rule.ruleID.trim())
+  ) {
+    errors.push(`Ya existe una regla con ruleID «${rule.ruleID.trim()}».`);
+  }
+  rule.conditions.forEach((c, i) => {
+    if (c.provider === "builtin.xml") {
+      if (!c.xpath.trim()) errors.push(`Condición ${i + 1}: falta la expresión XPath.`);
+    } else if (!c.pattern.trim()) {
+      errors.push(`Condición ${i + 1}: falta el patrón.`);
+    }
+  });
+  if (!rule.message.trim()) {
+    errors.push("Añade un mensaje: es lo que verá el desarrollador cuando la regla haga match.");
+  }
+  return errors;
+}
+
+/* ============================== Generación de YAML ============================== */
+
+function yamlScalar(s: string): string {
+  const v = s.trim();
+  if (v === "") return '""';
+  if (/^[A-Za-z0-9._\/=+][A-Za-z0-9._\/=+ -]*$/.test(v) && !/^(true|false|null|yes|no|on|off)$/i.test(v)) {
+    return v;
+  }
+  return JSON.stringify(v);
+}
+
+function condToLines(c: SimpleCond): string[] {
+  const lines: string[] = [];
+  switch (c.provider) {
+    case "java.referenced":
+      lines.push("java.referenced:");
+      lines.push(`  pattern: ${yamlScalar(c.pattern)}`);
+      if (c.location) lines.push(`  location: ${c.location}`);
+      break;
+    case "builtin.filecontent":
+      lines.push("builtin.filecontent:");
+      lines.push(`  pattern: ${yamlScalar(c.pattern)}`);
+      if (c.filePattern.trim()) lines.push(`  filePattern: ${yamlScalar(c.filePattern)}`);
+      break;
+    case "builtin.file":
+      lines.push("builtin.file:");
+      lines.push(`  pattern: ${yamlScalar(c.pattern)}`);
+      break;
+    case "builtin.xml":
+      lines.push("builtin.xml:");
+      lines.push(`  xpath: ${yamlScalar(c.xpath)}`);
+      if (c.filepaths.trim()) {
+        lines.push("  filepaths:");
+        c.filepaths
+          .split(",")
+          .map((f) => f.trim())
+          .filter(Boolean)
+          .forEach((f) => lines.push(`    - ${yamlScalar(f)}`));
+      }
+      break;
+  }
+  return lines;
+}
+
+function ruleLabels(rule: BuiltRule): string[] {
+  const labels = [targetLabel()];
+  for (const source of state.sources) labels.push(`konveyor.io/source=${source}`);
+  rule.labels
+    .split(",")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .forEach((l) => labels.push(l));
+  return labels;
+}
+
+/** Genera el fichero YAML de reglas del analyzer-lsp a partir del editor. */
+function buildRulesYaml(): string {
+  const out: string[] = [];
+  for (const rule of state.rules) {
+    out.push(`- ruleID: ${yamlScalar(rule.ruleID)}`);
+    if (rule.description.trim()) out.push(`  description: ${yamlScalar(rule.description)}`);
+    out.push(`  category: ${rule.category}`);
+    out.push(`  effort: ${rule.effort}`);
+    out.push("  labels:");
+    ruleLabels(rule).forEach((l) => out.push(`    - ${yamlScalar(l)}`));
+    out.push("  when:");
+    if (rule.conditions.length === 1 || rule.logic === "single") {
+      condToLines(rule.conditions[0]).forEach((ln) => out.push(`    ${ln}`));
+    } else {
+      out.push(`    ${rule.logic}:`);
+      for (const c of rule.conditions) {
+        const lines = condToLines(c);
+        out.push(`      - ${lines[0]}`);
+        lines.slice(1).forEach((ln) => out.push(`        ${ln}`));
+      }
+    }
+    if (rule.message.trim()) out.push(`  message: ${yamlScalar(rule.message)}`);
+    if (rule.linkUrl.trim()) {
+      out.push("  links:");
+      out.push(`    - title: ${yamlScalar(rule.linkTitle.trim() || rule.linkUrl)}`);
+      out.push(`      url: ${yamlScalar(rule.linkUrl)}`);
+    }
+  }
+  return out.join("\n") + "\n";
+}
+
+function rulesFileName(): string {
+  return `${slugify(state.name) || "custom"}-reglas.yaml`;
 }
 
 /* ============================== Validación ============================== */
@@ -158,7 +385,14 @@ function stepErrors(step: number): string[] {
     }
   }
   if (step === 1) {
-    if (state.mode === "upload") {
+    if (state.mode === "create") {
+      if (state.draft !== null) {
+        errors.push("Tienes una regla sin guardar: guárdala o cancela la edición.");
+      }
+      if (state.rules.length === 0 && state.draft === null) {
+        errors.push("Crea al menos una regla con el editor (o usa otro modo).");
+      }
+    } else if (state.mode === "upload") {
       if (state.files.length === 0) {
         errors.push("Sube al menos un fichero YAML de reglas.");
       } else if (!state.files.some((f) => f.ruleCount > 0)) {
@@ -202,7 +436,11 @@ function buildPayload(): object {
     description: state.description.trim(),
   };
 
-  if (state.mode === "upload") {
+  if (state.mode === "create") {
+    // El YAML generado por el editor se sube como un único fichero
+    // (POST /hub/files) y se referencia aquí; id 0 = placeholder.
+    ruleset.rules = [{ name: rulesFileName(), file: { id: 0, name: rulesFileName() } }];
+  } else if (state.mode === "upload") {
     // En el flujo real, cada fichero se sube antes con POST /hub/files
     // y aquí se referencia por id; se deja 0 como placeholder.
     ruleset.rules = state.files.map((f) => ({
@@ -301,6 +539,221 @@ function renderStep0(): string {
     </div>`;
 }
 
+/* ---------- Paso 2: editor interactivo ---------- */
+
+function renderCondFields(c: SimpleCond, i: number): string {
+  switch (c.provider) {
+    case "java.referenced":
+      return `
+        <label class="cf">
+          <span>Patrón <b class="req">*</b></span>
+          <input type="text" data-cf data-ci="${i}" data-field="pattern"
+            value="${esc(c.pattern)}" placeholder="javax.ejb.Stateless  ·  javax.ejb*" />
+        </label>
+        <label class="cf">
+          <span>Ubicación</span>
+          <select data-cf data-ci="${i}" data-field="location">
+            ${JAVA_LOCATIONS.map(
+              (loc) =>
+                `<option value="${loc}" ${c.location === loc ? "selected" : ""}>${loc || "(cualquiera)"}</option>`,
+            ).join("")}
+          </select>
+        </label>`;
+    case "builtin.filecontent":
+      return `
+        <label class="cf">
+          <span>Patrón (regex) <b class="req">*</b></span>
+          <input type="text" data-cf data-ci="${i}" data-field="pattern"
+            value="${esc(c.pattern)}" placeholder="java:jboss/datasources" />
+        </label>
+        <label class="cf">
+          <span>Filtro de ficheros</span>
+          <input type="text" data-cf data-ci="${i}" data-field="filePattern"
+            value="${esc(c.filePattern)}" placeholder="*.properties (opcional)" />
+        </label>`;
+    case "builtin.file":
+      return `
+        <label class="cf cf-wide">
+          <span>Patrón de nombre de fichero <b class="req">*</b></span>
+          <input type="text" data-cf data-ci="${i}" data-field="pattern"
+            value="${esc(c.pattern)}" placeholder="persistence\\.xml" />
+        </label>`;
+    case "builtin.xml":
+      return `
+        <label class="cf">
+          <span>XPath <b class="req">*</b></span>
+          <input type="text" data-cf data-ci="${i}" data-field="xpath"
+            value="${esc(c.xpath)}" placeholder="//dependency[artifactId='hibernate-core']" />
+        </label>
+        <label class="cf">
+          <span>Ficheros (separados por comas)</span>
+          <input type="text" data-cf data-ci="${i}" data-field="filepaths"
+            value="${esc(c.filepaths)}" placeholder="pom.xml (opcional)" />
+        </label>`;
+  }
+}
+
+function renderDraftForm(rule: BuiltRule): string {
+  const providerHelp = (p: CondProvider): string =>
+    COND_PROVIDERS.find((cp) => cp.value === p)?.help ?? "";
+  return `
+    <div class="builder-form">
+      <h3>${state.draftIndex >= 0 ? "Editar regla" : "Nueva regla"}</h3>
+      <div id="draft-errors"></div>
+
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">ruleID <b class="req">*</b></span>
+          <input id="r-id" type="text" value="${esc(rule.ruleID)}" />
+        </label>
+        <label class="field">
+          <span class="field-label">Categoría</span>
+          <select id="r-cat">
+            <option value="mandatory" ${rule.category === "mandatory" ? "selected" : ""}>mandatory — obligatoria</option>
+            <option value="optional" ${rule.category === "optional" ? "selected" : ""}>optional — opcional</option>
+            <option value="potential" ${rule.category === "potential" ? "selected" : ""}>potential — potencial</option>
+          </select>
+        </label>
+        <label class="field span-2">
+          <span class="field-label">Descripción</span>
+          <input id="r-desc" type="text" value="${esc(rule.description)}"
+            placeholder="Título corto de la regla, p. ej. «Reemplazar EJB Stateless por CDI»" />
+        </label>
+        <label class="field">
+          <span class="field-label">Esfuerzo (story points)</span>
+          <select id="r-effort">
+            ${EFFORT_LEVELS.map(
+              (e) => `<option value="${e}" ${rule.effort === e ? "selected" : ""}>${e}</option>`,
+            ).join("")}
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Labels extra (separados por comas)</span>
+          <input id="r-labels" type="text" value="${esc(rule.labels)}" placeholder="discovery, team=payments" />
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="field-label">Condiciones (when) <b class="req">*</b></span>
+        ${
+          rule.conditions.length > 1
+            ? `<div class="logic-row">
+                <span>Deben cumplirse:</span>
+                <select id="r-logic">
+                  <option value="and" ${rule.logic !== "or" ? "selected" : ""}>todas (AND)</option>
+                  <option value="or" ${rule.logic === "or" ? "selected" : ""}>cualquiera (OR)</option>
+                </select>
+              </div>`
+            : ""
+        }
+        ${rule.conditions
+          .map(
+            (c, i) => `
+          <div class="cond-row">
+            <div class="cond-head">
+              <select data-cprov data-ci="${i}" title="Tipo de condición">
+                ${COND_PROVIDERS.map(
+                  (cp) =>
+                    `<option value="${cp.value}" ${c.provider === cp.value ? "selected" : ""}>${cp.label}</option>`,
+                ).join("")}
+              </select>
+              ${
+                rule.conditions.length > 1
+                  ? `<button type="button" class="btn-x" data-rm-cond="${i}" title="Quitar condición">✕</button>`
+                  : ""
+              }
+            </div>
+            <p class="cond-help">${providerHelp(c.provider)}</p>
+            <div class="cond-fields">${renderCondFields(c, i)}</div>
+          </div>`,
+          )
+          .join("")}
+        <button type="button" class="btn btn-link" id="btn-add-cond">＋ Añadir otra condición</button>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Mensaje para el desarrollador <b class="req">*</b></span>
+        <textarea id="r-msg" rows="2"
+          placeholder="Qué debe hacer cuando la regla haga match, p. ej. «Usa @ApplicationScoped de CDI»">${esc(rule.message)}</textarea>
+      </label>
+
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">Enlace de documentación (opcional)</span>
+          <input id="r-link-url" type="text" value="${esc(rule.linkUrl)}" placeholder="https://..." />
+        </label>
+        <label class="field">
+          <span class="field-label">Título del enlace</span>
+          <input id="r-link-title" type="text" value="${esc(rule.linkTitle)}" placeholder="Guía de migración" />
+        </label>
+      </div>
+
+      <div class="inline-add">
+        <button type="button" class="btn btn-primary" id="btn-save-rule">💾 Guardar regla</button>
+        <button type="button" class="btn btn-secondary" id="btn-cancel-rule">Cancelar</button>
+      </div>
+    </div>`;
+}
+
+function renderBuilderPane(): string {
+  const list = state.rules.length
+    ? `<ul class="rule-list">
+        ${state.rules
+          .map(
+            (r, i) => `
+          <li class="rule-card">
+            <div class="rule-card-main">
+              <div class="rule-card-title">
+                <code>${esc(r.ruleID)}</code>
+                <span class="badge badge-${r.category}">${r.category}</span>
+                <span class="badge badge-effort">esfuerzo ${r.effort}</span>
+              </div>
+              ${r.description ? `<p class="rule-desc">${esc(r.description)}</p>` : ""}
+              <p class="rule-when">
+                ${r.conditions.map((c) => `<code>${esc(condSummary(c))}</code>`).join(
+                  ` <em>${r.logic === "or" ? "OR" : "AND"}</em> `,
+                )}
+              </p>
+            </div>
+            <div class="rule-card-actions">
+              <button type="button" class="btn-mini" data-edit-rule="${i}">✏️ Editar</button>
+              <button type="button" class="btn-mini" data-del-rule="${i}">🗑 Borrar</button>
+            </div>
+          </li>`,
+          )
+          .join("")}
+      </ul>`
+    : "";
+
+  const empty =
+    state.rules.length === 0 && !state.draft
+      ? `<div class="empty-state">
+          <p>🧩 Aún no hay reglas.</p>
+          <p class="hint">Crea tu primera regla con el asistente: eliges la condición
+          (clase Java, contenido de fichero, XPath...) y el wizard genera el YAML por ti.</p>
+          <button type="button" class="btn btn-primary" id="btn-first-rule">＋ Crear mi primera regla</button>
+        </div>`
+      : "";
+
+  const toolbar =
+    state.rules.length > 0 && !state.draft
+      ? `<div class="builder-toolbar">
+          <span><strong>${state.rules.length}</strong> regla${state.rules.length === 1 ? "" : "s"} definida${state.rules.length === 1 ? "" : "s"}</span>
+          <button type="button" class="btn btn-secondary" id="btn-new-rule">＋ Nueva regla</button>
+        </div>`
+      : "";
+
+  const yamlPreview =
+    state.rules.length > 0
+      ? `<details class="yaml-details" ${state.draft ? "" : "open"}>
+          <summary>Vista previa del YAML generado — <code>${esc(rulesFileName())}</code></summary>
+          <pre class="code">${esc(buildRulesYaml())}</pre>
+        </details>`
+      : "";
+
+  return `${toolbar}${list}${empty}${state.draft ? renderDraftForm(state.draft) : ""}${yamlPreview}`;
+}
+
 function renderStep1(): string {
   const uploadPane = `
     <div id="dropzone" class="dropzone">
@@ -359,13 +812,23 @@ function renderStep1(): string {
       </label>
     </div>`;
 
+  const panes: Record<RulesMode, string> = {
+    create: renderBuilderPane(),
+    upload: uploadPane,
+    repository: repoPane,
+  };
+
   return `
     <h2>Reglas personalizadas</h2>
     <p class="hint">Un target agrupa un <em>ruleset</em>: reglas YAML del
     <a href="https://github.com/konveyor/analyzer-lsp" target="_blank" rel="noopener">analyzer-lsp</a>.
-    Puedes subirlas manualmente o referenciar un repositorio.</p>
+    Puedes <strong>crearlas de forma interactiva</strong> con el editor (recomendado),
+    subir ficheros ya escritos, o referenciar un repositorio.</p>
 
     <div class="mode-toggle" role="tablist">
+      <button type="button" class="mode-btn ${state.mode === "create" ? "mode-on" : ""}" data-mode="create">
+        ✏️ Crear reglas
+      </button>
       <button type="button" class="mode-btn ${state.mode === "upload" ? "mode-on" : ""}" data-mode="upload">
         ⬆️ Subir ficheros
       </button>
@@ -374,7 +837,7 @@ function renderStep1(): string {
       </button>
     </div>
 
-    ${state.mode === "upload" ? uploadPane : repoPane}`;
+    ${panes[state.mode]}`;
 }
 
 function renderStep2(): string {
@@ -415,29 +878,42 @@ function renderStep2(): string {
           </label>`,
         ).join("")}
       </div>
+      <span class="field-help">Si has creado reglas con el editor, estos sources se añaden
+      también como labels de cada regla en el YAML generado.</span>
     </div>`;
 }
 
 function renderStep3(): string {
   const payload = JSON.stringify(buildPayload(), null, 2);
   const rulesSummary =
-    state.mode === "upload"
-      ? `${state.files.length} fichero(s), ${state.files.reduce((n, f) => n + f.ruleCount, 0)} regla(s)`
-      : `${state.repo.kind} · ${esc(state.repo.url)}${state.repo.branch ? ` @ ${esc(state.repo.branch)}` : ""}`;
+    state.mode === "create"
+      ? `${state.rules.length} regla(s) creada(s) con el editor → <code>${esc(rulesFileName())}</code>`
+      : state.mode === "upload"
+        ? `${state.files.length} fichero(s), ${state.files.reduce((n, f) => n + f.ruleCount, 0)} regla(s)`
+        : `${state.repo.kind} · ${esc(state.repo.url)}${state.repo.branch ? ` @ ${esc(state.repo.branch)}` : ""}`;
 
   if (state.created) {
+    const uploadLine =
+      state.mode === "create"
+        ? `curl -X POST $HUB_URL/files -F "file=@${rulesFileName()}"`
+        : 'curl -X POST $HUB_URL/files -F "file=@mis-reglas.yaml"';
     return `
       <div class="success">
         <div class="success-icon">✅</div>
         <h2>Target «${esc(state.name)}» listo</h2>
         <p>El payload se ha generado. Para crearlo en un Hub real de Konveyor:</p>
         <pre class="code">« subir cada fichero de reglas »
-curl -X POST $HUB_URL/files -F "file=@mis-reglas.yaml"
+${uploadLine}
 
 « crear el target con los ids de fichero devueltos »
 curl -X POST $HUB_URL/targets \\
   -H "Content-Type: application/json" \\
   -d @target.json</pre>
+        ${
+          state.mode === "create"
+            ? `<button type="button" class="btn btn-secondary" id="btn-download-yaml-2">⬇ Descargar ${esc(rulesFileName())}</button>`
+            : ""
+        }
         <button type="button" class="btn btn-primary" id="btn-download-2">⬇ Descargar target.json</button>
         <button type="button" class="btn btn-secondary" id="btn-restart">Crear otro target</button>
       </div>`;
@@ -453,11 +929,25 @@ curl -X POST $HUB_URL/targets \\
       <dt>Labels</dt><dd>${allLabels().map((l) => `<span class="label-pill">${esc(l)}</span>`).join(" ")}</dd>
     </dl>
 
+    ${
+      state.mode === "create" && state.rules.length > 0
+        ? `<details class="yaml-details">
+            <summary>Reglas generadas — <code>${esc(rulesFileName())}</code></summary>
+            <pre class="code">${esc(buildRulesYaml())}</pre>
+          </details>`
+        : ""
+    }
+
     <div class="field">
       <span class="field-label">Payload — <code>POST /hub/targets</code></span>
       <pre class="code" id="payload-pre">${esc(payload)}</pre>
       <div class="inline-add">
         <button type="button" class="btn btn-secondary" id="btn-download">⬇ Descargar target.json</button>
+        ${
+          state.mode === "create" && state.rules.length > 0
+            ? `<button type="button" class="btn btn-secondary" id="btn-download-yaml">⬇ Descargar YAML de reglas</button>`
+            : ""
+        }
         <button type="button" class="btn btn-secondary" id="btn-copy">📋 Copiar</button>
       </div>
     </div>`;
@@ -468,10 +958,8 @@ curl -X POST $HUB_URL/targets \\
 function bindStep0(): void {
   $("#f-name").addEventListener("input", (e) => {
     state.name = (e.target as HTMLInputElement).value;
-    const help = document.querySelector("#f-name + .field-help, .field-help code");
     const codeEl = document.querySelector<HTMLElement>(".field-help code");
     if (codeEl) codeEl.textContent = targetLabel();
-    void help;
   });
   $("#f-desc").addEventListener("input", (e) => {
     state.description = (e.target as HTMLTextAreaElement).value;
@@ -510,6 +998,102 @@ function addFiles(files: FileList | File[]): void {
   }
 }
 
+function startDraft(index: number): void {
+  state.draftIndex = index;
+  state.draft = index >= 0 ? (JSON.parse(JSON.stringify(state.rules[index])) as BuiltRule) : newRule();
+  render();
+}
+
+function bindBuilder(): void {
+  document.querySelector<HTMLElement>("#btn-first-rule")?.addEventListener("click", () => startDraft(-1));
+  document.querySelector<HTMLElement>("#btn-new-rule")?.addEventListener("click", () => startDraft(-1));
+
+  document.querySelectorAll<HTMLElement>("[data-edit-rule]").forEach((btn) => {
+    btn.addEventListener("click", () => startDraft(Number(btn.dataset.editRule)));
+  });
+  document.querySelectorAll<HTMLElement>("[data-del-rule]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.rules.splice(Number(btn.dataset.delRule), 1);
+      render();
+    });
+  });
+
+  const draft = state.draft;
+  if (!draft) return;
+
+  // Campos de texto: actualizan el borrador sin re-render (para no perder el foco)
+  const bindText = (sel: string, set: (v: string) => void): void => {
+    document.querySelector<HTMLElement>(sel)?.addEventListener("input", (e) => {
+      set((e.target as HTMLInputElement | HTMLTextAreaElement).value);
+    });
+  };
+  bindText("#r-id", (v) => (draft.ruleID = v));
+  bindText("#r-desc", (v) => (draft.description = v));
+  bindText("#r-msg", (v) => (draft.message = v));
+  bindText("#r-labels", (v) => (draft.labels = v));
+  bindText("#r-link-url", (v) => (draft.linkUrl = v));
+  bindText("#r-link-title", (v) => (draft.linkTitle = v));
+
+  document.querySelector<HTMLSelectElement>("#r-cat")?.addEventListener("change", (e) => {
+    draft.category = (e.target as HTMLSelectElement).value as RuleCategory;
+  });
+  document.querySelector<HTMLSelectElement>("#r-effort")?.addEventListener("change", (e) => {
+    draft.effort = Number((e.target as HTMLSelectElement).value);
+  });
+  document.querySelector<HTMLSelectElement>("#r-logic")?.addEventListener("change", (e) => {
+    draft.logic = (e.target as HTMLSelectElement).value as CondLogic;
+  });
+
+  // Condiciones
+  document.querySelectorAll<HTMLInputElement>("[data-cf]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const ci = Number(input.dataset.ci);
+      const field = input.dataset.field as keyof SimpleCond;
+      if (field !== "provider") {
+        (draft.conditions[ci][field] as string) = input.value;
+      }
+    });
+  });
+  document.querySelectorAll<HTMLSelectElement>("[data-cprov]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      draft.conditions[Number(sel.dataset.ci)].provider = sel.value as CondProvider;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-rm-cond]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      draft.conditions.splice(Number(btn.dataset.rmCond), 1);
+      if (draft.conditions.length <= 1) draft.logic = "single";
+      render();
+    });
+  });
+  document.querySelector<HTMLElement>("#btn-add-cond")?.addEventListener("click", () => {
+    draft.conditions.push(newCondition());
+    if (draft.logic === "single") draft.logic = "and";
+    render();
+  });
+
+  $("#btn-save-rule").addEventListener("click", () => {
+    const errors = validateDraft(draft);
+    if (errors.length > 0) {
+      $("#draft-errors").innerHTML = `
+        <div class="alert">${errors.map((err) => `<p>⚠ ${esc(err)}</p>`).join("")}</div>`;
+      return;
+    }
+    draft.ruleID = draft.ruleID.trim();
+    if (state.draftIndex >= 0) state.rules[state.draftIndex] = draft;
+    else state.rules.push(draft);
+    state.draft = null;
+    state.draftIndex = -1;
+    render();
+  });
+  $("#btn-cancel-rule").addEventListener("click", () => {
+    state.draft = null;
+    state.draftIndex = -1;
+    render();
+  });
+}
+
 function bindStep1(): void {
   document.querySelectorAll<HTMLElement>("[data-mode]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -518,7 +1102,9 @@ function bindStep1(): void {
     });
   });
 
-  if (state.mode === "upload") {
+  if (state.mode === "create") {
+    bindBuilder();
+  } else if (state.mode === "upload") {
     const drop = $("#dropzone");
     const input = $("#f-files") as HTMLInputElement;
     $("#btn-browse").addEventListener("click", () => input.click());
@@ -591,21 +1177,34 @@ function bindStep2(): void {
   });
 }
 
-function downloadPayload(): void {
-  const blob = new Blob([JSON.stringify(buildPayload(), null, 2)], {
-    type: "application/json",
-  });
+function downloadBlob(content: string, mime: string, filename: string): void {
+  const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `target-${slugify(state.name) || "konveyor"}.json`;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function downloadPayload(): void {
+  downloadBlob(
+    JSON.stringify(buildPayload(), null, 2),
+    "application/json",
+    `target-${slugify(state.name) || "konveyor"}.json`,
+  );
+}
+
+function downloadRulesYaml(): void {
+  downloadBlob(buildRulesYaml(), "application/yaml", rulesFileName());
 }
 
 function bindStep3(): void {
   if (state.created) {
     $("#btn-download-2").addEventListener("click", downloadPayload);
+    document
+      .querySelector<HTMLElement>("#btn-download-yaml-2")
+      ?.addEventListener("click", downloadRulesYaml);
     $("#btn-restart").addEventListener("click", () => {
       Object.assign(state, {
         step: 0,
@@ -614,7 +1213,10 @@ function bindStep3(): void {
         description: "",
         provider: "Java",
         icon: ICONS[0],
-        mode: "upload" as RulesMode,
+        mode: "create" as RulesMode,
+        rules: [],
+        draft: null,
+        draftIndex: -1,
         files: [],
         repo: { kind: "git", url: "", branch: "", path: "", credentials: "" },
         customLabels: [],
@@ -626,6 +1228,9 @@ function bindStep3(): void {
     return;
   }
   $("#btn-download").addEventListener("click", downloadPayload);
+  document
+    .querySelector<HTMLElement>("#btn-download-yaml")
+    ?.addEventListener("click", downloadRulesYaml);
   $("#btn-copy").addEventListener("click", () => {
     void navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2)).then(() => {
       $("#btn-copy").textContent = "✓ Copiado";

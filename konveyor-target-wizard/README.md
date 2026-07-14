@@ -8,9 +8,22 @@ replicando el flujo de *Administration → Custom migration targets* de
 ## Pasos del wizard
 
 1. **Datos generales** — nombre, descripción, proveedor de lenguaje e icono.
-2. **Reglas personalizadas** — dos modos, como en Konveyor:
-   - **Subir ficheros**: drag & drop de ficheros YAML de reglas del
-     [analyzer-lsp](https://github.com/konveyor/analyzer-lsp), con análisis
+2. **Reglas personalizadas** — tres modos (la subida de ficheros es opcional):
+   - **Crear reglas (editor interactivo, modo por defecto)**: formulario asistido
+     que genera el YAML del
+     [analyzer-lsp](https://github.com/konveyor/analyzer-lsp) sin escribirlo a
+     mano: `ruleID` autogenerado, descripción, categoría
+     (mandatory/optional/potential), esfuerzo, mensaje para el desarrollador,
+     enlace de documentación y condiciones `when` combinables con AND/OR:
+     - `java.referenced` (patrón + location: IMPORT, ANNOTATION, METHOD_CALL…)
+     - `builtin.filecontent` (regex + filtro de ficheros)
+     - `builtin.file` (patrón de nombre de fichero)
+     - `builtin.xml` (XPath + filepaths)
+
+     Incluye lista de reglas con edición/borrado, validación por regla
+     (ruleID único, condiciones completas, mensaje) y vista previa en vivo del
+     YAML generado, descargable como `<slug>-reglas.yaml`.
+   - **Subir ficheros**: drag & drop de ficheros YAML de reglas, con análisis
      ligero (cuenta `ruleID`, avisa si falta `when:`, detecta ficheros vacíos
      o `ruleset.yaml` de metadatos).
    - **Repositorio**: git/subversion con URL, branch, path raíz y credencial
